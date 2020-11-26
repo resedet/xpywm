@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/local/bin/python3.7
 #
 # A simple but extensible X11 window manager written in Python.
 # Copyright (c) 2018-2019, Hiroyuki Ohsaki.
@@ -29,11 +29,7 @@ import time
 from Xlib import X, display, XK
 
 FRAME_WIDTH = 2
-FRAME_COLOR = 'aquamarine1'
-TITLE_WIDTH = 96
-TITLE_HEIGHT = 10
-TITLE_FONT = '-schumacher-clean-bold-r-normal--8-80-75-75-c-80-iso646.1991-irv'
-TITLE_COLOR = 'aquamarine3'
+FRAME_COLOR = 'Cadet Blue'
 Y_OFFSET = 8
 PNT_OFFSET = 16
 DRAG_THRESH = 16
@@ -58,10 +54,8 @@ EVENT_HANDLER = {
 KEYBOARD_HANDLER = {
     'i':
     {'modifier': X.Mod1Mask | X.ControlMask, 'method': 'cb_focus_next_window'},
-    'm': {
-        'modifier': X.Mod1Mask | X.ControlMask, 'method':
-        'cb_raise_or_lower_window'
-    },
+    'm':
+    {'modifier': X.Mod1Mask | X.ControlMask, 'method': 'cb_focus_previous_window'},
     'apostrophe':
     {'modifier': X.Mod1Mask | X.ControlMask, 'method': 'cb_maximize_window'},
     'semicolon': {
@@ -97,12 +91,23 @@ KEYBOARD_HANDLER = {
         'modifier': X.Mod1Mask | X.ControlMask, 'command':
         'pidof firefox || firefox &'
     },
+    '4': {
+        'modifier': X.Mod1Mask | X.ControlMask, 'command':
+        'pidof qutebrowser || qutebrowser &'
+    },
+    '0': {
+        'modifier': X.Mod1Mask | X.ControlMask, 'command':
+        'import -window root /tmp/`date +%y%m%d-%H:%M:%S`.png'
+    },
     'F1': {'modifier': X.Mod1Mask, 'method': 'select_vscreen', 'args': 0},
     'F2': {'modifier': X.Mod1Mask, 'method': 'select_vscreen', 'args': 1},
     'F3': {'modifier': X.Mod1Mask, 'method': 'select_vscreen', 'args': 2},
     'F4': {'modifier': X.Mod1Mask, 'method': 'select_vscreen', 'args': 3},
     'F7': {
         'modifier': X.ShiftMask, 'function': 'xrandr_enable_external_output'
+    },
+    'f': {'modifier': X.Mod1Mask | X.ControlMask, 
+          'method': 'cb_show_cursor',
     },
     'XF86AudioRaiseVolume': {
         'modifier': X.NONE, 'function': 'audio_raise_volume'
@@ -124,7 +129,7 @@ LAYOUT_OFFSET = 0
 LAYOUT_RULES = {
     r'xterm|rxvt': [.5, .3, .5, .7],
     r'emacs': [0, 0, .5 - LAYOUT_OFFSET, 1],
-    r'firefox|chrom(e|ium)|midori':
+    r'firefox|chrom(e|ium)|midori|qutebrowser':
     [.5 - LAYOUT_OFFSET, 0, .5 + LAYOUT_OFFSET, 1],
     r'pdf|dvi|office|acroread|tgif|mathematica|libre':
     [.5 - LAYOUT_OFFSET, 0, .5 + LAYOUT_OFFSET, 1],
@@ -233,6 +238,48 @@ def audio_lower_volume(delta=10):
     """Decrease the volume of the default mixer by DELTA."""
     debug('audio_lower_volume: %s', delta)
     audio_raise_volume(-delta)
+
+class ShowCursor():
+    def __init__(self):
+        # hold/check last command, because it seems xfixes_hide_cursor
+        # instuction is stacked. (If X times execute
+        # xfixes_hide_cursor, X times exexutoin of xfixes_show_cursor
+        # is need to show cursor) -u1 [2019/10/28]
+        self._last_cmd = None
+        self._always_show_cursor = False
+
+    def show_cursor(self, _bool, client):
+        _bool = self._always_show_cursor or _bool
+        if self._last_cmd == _bool:
+            return
+        try:
+            display = client.display
+            window = client.screen.root
+        except AttributeError:
+            return
+        display.xfixes_query_version()
+        if _bool:
+            window.xfixes_show_cursor()
+        else:
+            window.xfixes_hide_cursor()
+        display.flush()
+        self._last_cmd = _bool
+
+    def toggle_always_show_cursor(self, client):
+        self._always_show_cursor = not self._always_show_cursor
+        self.show_cursor(self._always_show_cursor, client)
+
+sc = ShowCursor()
+def toggle_show_cursor(client):
+    sc.toggle_always_show_cursor(client)
+
+def cursor_set(cls, client):
+    def touchpad_is(_bool):
+        os.system('synclient TouchpadOff={}'.format(int(not _bool)))
+    m = re.search(STOP_CURSOR_CLS, cls.lower())
+    # ↓タッチパッド (?) の有効 / 無効を切り替えている -u1 [2019/11/06]
+    touchpad_is(not m)
+    sc.show_cursor(not m, client)
 
 def load_rcfile():
     """Load and execute the custom RC script in the home directory
@@ -428,26 +475,6 @@ class WindowManager():
             window.map()
             self.frame_windows[side] = window
 
-        # create title window
-        pixel = colormap.alloc_named_color(TITLE_COLOR).pixel
-        window = self.screen.root.create_window(
-            0,
-            0,
-            TITLE_WIDTH,
-            TITLE_HEIGHT,
-            0,
-            self.screen.root_depth,
-            X.InputOutput,
-            background_pixel=pixel,
-            override_redirect=1,
-        )
-        window.map()
-        self.frame_windows['title'] = window
-        # create GC for title window
-        font = self.display.open_font(TITLE_FONT)
-        self.frame_gc = window.create_gc(font=font,
-                                         foreground=self.screen.black_pixel)
-
     def draw_frame_windows(self, window):
         """Draw a frame window surrounding a windwow WINDOW."""
 
@@ -461,7 +488,7 @@ class WindowManager():
         geom = self.get_window_geometry(window)
         if geom is None:
             return
-        for side in ['frame_l', 'frame_r', 'frame_u', 'frame_d', 'title']:
+        for side in ['frame_l', 'frame_r', 'frame_u', 'frame_d']:
             x, y, width, height = 0, 0, 0, 0
             if side == 'frame_l':
                 x = geom.x - FRAME_WIDTH
@@ -483,29 +510,16 @@ class WindowManager():
                 y = geom.y + geom.height
                 width = geom.width + 2 * FRAME_WIDTH
                 height = FRAME_WIDTH
-            elif side == 'title':
-                x = geom.x + geom.width - TITLE_WIDTH
-                y = geom.y + geom.height - TITLE_HEIGHT
-                width = TITLE_WIDTH
-                height = TITLE_HEIGHT
 
             win = self.frame_windows[side]
             win.configure(x=x, y=y, width=width, height=height)
-            if side == 'title':
-                # update title bar
-                win.clear_area(0, 0, TITLE_WIDTH, TITLE_HEIGHT)
-                name = '{:x}{}'.format(window.id,
-                                       self.get_window_class(window))
-                xpos = max(0, (TITLE_WIDTH - len(name) * 8) // 2)
-                chars = [chr(c).encode() for c in list(name.encode())]
-                win.poly_text(self.frame_gc, xpos, 8, chars)
 
             # NOTE: might be redundant
             win.map()
             win.raise_window()
 
     def hide_frame_windows(self, window):
-        for side in ['frame_l', 'frame_r', 'frame_u', 'frame_d', 'title']:
+        for side in ['frame_l', 'frame_r', 'frame_u', 'frame_d']:
             win = self.frame_windows[side]
             win.unmap()
 
@@ -608,6 +622,32 @@ class WindowManager():
                 return
         next_window.raise_window()
         next_window.warp_pointer(PNT_OFFSET, PNT_OFFSET)
+        self.focus_window(next_window)
+
+    def focus_n_p_window(self, window=None, next_previous=1):
+        """Change the active window from the window WINDOW to the next one.
+        The active window is raised and focused.  The pointer is moved to the
+        north-west of the window."""
+
+        def _sort_key(window):
+            geom = window.get_geometry()
+            return geom.x * 10000 + geom.y
+
+        # sort active windows with their geometries
+        windows = sorted(self.exposed_windows, key=_sort_key)
+        try:
+            i = windows.index(window)
+            next_window = windows[(i + next_previous) % len(windows)]
+        except ValueError:
+	    # next_window = windows[0]
+            if windows:
+                next_window = windows[0]
+            else:
+                return
+
+        next_window.raise_window()
+        geom = next_window.get_geometry()
+        next_window.warp_pointer(geom.width // 2, geom.height // 2)
         self.focus_window(next_window)
 
     def is_maximized(self, window):
@@ -788,7 +828,13 @@ class WindowManager():
 
     def cb_focus_next_window(self, event):
         window = event.child
-        self.focus_next_window(window)
+        # self.focus_next_window(window)
+        self.focus_n_p_window(window, 1)
+
+    def cb_focus_previous_window(self, event):
+        window = event.child
+        # self.focus_next_window(window)
+        self.focus_n_p_window(window, -1)
 
     def cb_maximize_window(self, event, horizontally=True):
         window = event.child
@@ -826,6 +872,9 @@ class WindowManager():
         vscreen = self.current_vscreen
         if vscreen < MAX_VSCREEN:
             self.select_vscreen(vscreen + 1)
+
+    def cb_show_cursor(self, event):
+        toggle_show_cursor(self)
 
     # ---------------- event handlers
     def handle_keypress(self, event):
@@ -996,7 +1045,7 @@ def main():
 
     wm.create_frame_windows()
     wm.select_vscreen(0)
-    wm.focus_next_window()
+    wm.focus_n_p_window()
     wm.event_loop()
 
 if __name__ == "__main__":
